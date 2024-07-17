@@ -18,4 +18,4 @@ ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
 # 指定运行命令（根据你的项目实际情况修改）
-CMD ["python", "app.py"]
+CMD ["python", "lab.py"]
