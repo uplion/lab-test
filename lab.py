@@ -3,6 +3,7 @@ import aiohttp
 import time
 import os
 from kubernetes import client, config
+from random import randint
 
 data = {"model": "static","messages": [{"role": "user","content": "Hello"}]}
 
@@ -25,31 +26,42 @@ def get_k8s_cluster_status():
         "pods": len(pods.items)
     }
 
-async def main(duration_minutes, max_requests_per_minute, url):
+def get_current_request(minute):
+    if minute < 6: return randint(10, 50)
+    elif minute < 9: return (minute - 6) * (200 - 50) / (9 - 6) + 50
+    elif minute < 12: return randint(200, 400)
+    elif minute < 13: return randint(150, 300)
+    elif minute < 17: return randint(300, 500)
+    elif minute < 19: return (19 - minute) * (500 - 200) / (19 - 17) + 100
+    elif minute < 22: return randint(200, 400)
+    else: return (24 - minute) * (200 - 50) / (24 - 22) + 50
+
+async def main(duration_minutes, url):
     start_time = time.time()
     end_time = start_time + (duration_minutes * 60)
     
-    current_requests = max_requests_per_minute
-    
-    while time.time() < end_time:
-        loop_start = time.time()
-        
-        await perform_requests(current_requests, url)
-        
-        cluster_status = get_k8s_cluster_status()
-        print(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"Requests made: {current_requests}")
-        print(f"Cluster status: {cluster_status}")
-        
-        elapsed = time.time() - loop_start
-        if elapsed < 60:
-            await asyncio.sleep(60 - elapsed)
+    with open("log.csv", "w") as f:
+        f.write("Time,Requests,Nodes,Pods\n")
+        minute = 0
+        while time.time() < end_time:
+            current_requests = get_current_request(minute % 24)
+            loop_start = time.time()
+            
+            await perform_requests(current_requests, url)
+            
+            cluster_status = get_k8s_cluster_status()
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{current_requests},{cluster_status['nodes']},{cluster_status['pods']}\n")
+            
+            elapsed = time.time() - loop_start
+            if elapsed < 60:
+                await asyncio.sleep(60 - elapsed)
+            minute += 1
 
 if __name__ == "__main__":
-    duration_minutes = 30  # 运行总时间
-    max_requests_per_minute = 60  # 每分钟最大请求数
-    url = os.getenv("URL", "http://localhost:8081/v1/chat/completions")
+    duration_minutes = 5  # 运行总时间
+    # max_requests_per_minute = 60  # 每分钟最大请求数
+    url = os.getenv("TEST_URL", "http://localhost:5000/v1/chat/completions")
     
-    asyncio.run(main(duration_minutes, max_requests_per_minute, url))
-    asyncio.run(main(duration_minutes, max_requests_per_minute * 2, url))
-    asyncio.run(main(duration_minutes, max_requests_per_minute, url))
+    asyncio.run(main(duration_minutes, url))
+    # asyncio.run(main(duration_minutes, max_requests_per_minute * 2, url))
+    # asyncio.run(main(duration_minutes, max_requests_per_minute, url))
