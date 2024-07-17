@@ -1,67 +1,101 @@
-import asyncio
-import aiohttp
 import time
 import os
 from kubernetes import client, config
-from random import randint
+import json
+import requests
+import threading
 
-data = {"model": "static","messages": [{"role": "user","content": "Hello"}]}
+data = {"model": "static2","messages": [{"role": "user","content": "Hello"}]}
 
-async def make_request(session, url):
-    async with session.get(url) as response:
-        return await response.text()
+def worker(url):
+    response = requests.post(url, json=data)
+    print('.', end='')
+    return response
 
-async def perform_requests(num_requests, url):
-    async with aiohttp.ClientSession() as session:
-        tasks = [make_request(session, url) for _ in range(num_requests)]
-        await asyncio.gather(*tasks)
+
+def perform_requests(count, url):
+    for i in range(count):
+        threading.Thread(target=worker, args=(url,)).start()
+        time.sleep(0.04)
 
 def get_k8s_cluster_status():
     config.load_kube_config()
     v1 = client.CoreV1Api()
     nodes = v1.list_node()
-    pods = v1.list_namespaced_pod(namespace="aimodel-sample")
+    pods = v1.list_namespaced_pod(namespace="default", label_selector="aimodel-internel-selector=aimodel-sample")
     return {
         "nodes": len(nodes.items),
         "pods": len(pods.items)
     }
 
-def get_current_request(minute):
-    if minute < 6: return randint(10, 50)
-    elif minute < 9: return (minute - 6) * (200 - 50) / (9 - 6) + 50
-    elif minute < 12: return randint(200, 400)
-    elif minute < 13: return randint(150, 300)
-    elif minute < 17: return randint(300, 500)
-    elif minute < 19: return (19 - minute) * (500 - 200) / (19 - 17) + 100
-    elif minute < 22: return randint(200, 400)
-    else: return (24 - minute) * (200 - 50) / (24 - 22) + 50
+def get_hpa_info(name='keda-hpa-aimodel-sample-scaledobject'):
+    config.load_kube_config()
+    v1 = client.AutoscalingV1Api()
+    hpa = v1.read_namespaced_horizontal_pod_autoscaler(name, "default")
+    metrics = json.loads(hpa.metadata.annotations['autoscaling.alpha.kubernetes.io/current-metrics'])[0]['external']
+    return {
+        "min_replicas": hpa.spec.min_replicas,
+        "max_replicas": hpa.spec.max_replicas,
+        "current_replicas": hpa.status.current_replicas,
+        "desired_replicas": hpa.status.desired_replicas,
+        "currentMetrics": metrics['currentValue'],
+        'currentAverageMetrics': metrics['currentAverageValue']
+    }
 
-async def main(duration_minutes, url):
+def get_current_request(minute):
+    if minute <= 4: # [2, 10]
+        return minute * 2 + 2
+    if minute <= 18:
+        return 20
+    return 4
+    
+
+
+def main(duration_minutes, url):
     start_time = time.time()
     end_time = start_time + (duration_minutes * 60)
-    
-    with open("log.csv", "w") as f:
-        f.write("Time,Requests,Nodes,Pods\n")
-        minute = 0
-        while time.time() < end_time:
-            current_requests = get_current_request(minute % 24)
-            loop_start = time.time()
+
+    minute = 0
+    while time.time() < end_time:
+        minute_start = time.time()
+        current_requests = get_current_request(minute)
+        print(f'===== minute: {minute}, current_requests: {current_requests}')
+
+        while time.time() < minute_start + 60:
+            second_start = time.time()
+            print(f"\ttime: {minute}:{second_start - minute_start:.2f} performing {current_requests} requests")
+            perform_requests(current_requests, url)
+
+            time.sleep(max(0, second_start + 1 - time.time()))  
+        
+        with open("log.json", "a") as f:
+            f.write(json.dumps({
+                "time": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "current_requests": current_requests,
+                "cluster_status": get_k8s_cluster_status(),
+                "hpa_info": get_hpa_info(),
+            }) + '\n')
+
+        minute += 1
+        
+
             
-            await perform_requests(current_requests, url)
-            
-            cluster_status = get_k8s_cluster_status()
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{current_requests},{cluster_status['nodes']},{cluster_status['pods']}\n")
-            
-            elapsed = time.time() - loop_start
-            if elapsed < 60:
-                await asyncio.sleep(60 - elapsed)
-            minute += 1
 
 if __name__ == "__main__":
-    duration_minutes = 5  # 运行总时间
-    # max_requests_per_minute = 60  # 每分钟最大请求数
-    url = os.getenv("TEST_URL", "http://localhost:5000/v1/chat/completions")
+    duration_minutes = 60
+    url = os.getenv("TEST_URL", "http://172.21.0.2:30080/api/v1/chat/completions")
     
-    asyncio.run(main(duration_minutes, url))
-    # asyncio.run(main(duration_minutes, max_requests_per_minute * 2, url))
-    # asyncio.run(main(duration_minutes, max_requests_per_minute, url))
+    try:
+        os.remove("log.json")
+    except:
+        pass
+
+    print("+ kubectl delete -f ../aimodel_test.yaml")
+    os.system("kubectl delete -f ../aimodel_test.yaml")
+    print("+ kubectl apply -f ../aimodel_test.yaml")
+    os.system("kubectl apply -f ../aimodel_test.yaml")
+    time.sleep(5)
+
+    print("Start testing")
+    main(duration_minutes, url)
+    
